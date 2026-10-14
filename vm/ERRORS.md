@@ -38,6 +38,19 @@ Logs are in /data/freetoken-test/*.log (not committed).
 - **Seen:** `ssh ml 'pkill -f "ft serve --model" …'` exited 255. The pattern matched the remote bash running the command, so it killed itself.
 - **Status:** fixed. Use a bracket pattern: `pgrep -f "[b]in/ft serve" | xargs -r kill`.
 
+## E7. gpt-oss: tool without `description` → HTTP 400, 2026-10-14
+- **Seen:** `/v1/chat/completions` with `tools=[{function:{name, parameters}}]` (no description) → 400 `could not encode request: 'dict object' has no attribute 'description'`; tokenizer log `UndefinedError`.
+- **Cause:** the gpt-oss checkpoint's chat_template.jinja (line 113) emits `"// " + tool.description` unconditionally. The OpenAI API makes `description` optional, and FreeToken passes the tool dict to the template as is.
+- **Impact:** low for agents (Claude Code, Codex and OpenCode always send descriptions); any client that omits it fails outright on gpt-oss. The same tool WITH a description returned a correct `tool_calls`.
+- **Status:** open.
+- **Fix plan (fork, small):** where FreeToken builds the template's `tools` (server side, before `apply_chat_template`), default a missing `function.description` to `""`. Test: a tools request without description on gpt-oss returns 200. Template-agnostic, so worth offering upstream.
+
+## E8. `usage.prompt_tokens_details.cached_tokens` not reported, 2026-10-14
+- **Seen:** second identical 9.3k-token prompt: server log `#cached-token: 9310`, but the response `usage` has no `prompt_tokens_details`.
+- **Impact:** cosmetic; clients can't see prefix-cache hits (OpenAI-style cost and latency dashboards).
+- **Status:** open, low priority.
+- **Fix plan:** fill `prompt_tokens_details.cached_tokens` from the scheduler's cached-token count in the OpenAI usage builder (the Anthropic API has `cache_read_input_tokens` for the same thing).
+
 ## Watch list (open upstream, not hit yet)
 - #681 a request field msgpack can't pack → 500 + permanently leaked `requests.active`.
 - #682 `/v1/completions` ignores `n`.
