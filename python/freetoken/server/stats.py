@@ -55,6 +55,12 @@ class StatsTracker:
         if uid in self._inflight:
             self._aborting.add(uid)
 
+    def on_rejected(self, uid: int) -> None:
+        """The request never reached the scheduler (e.g. it could not be encoded), so no
+        terminal acknowledgement will ever release it: drop it now."""
+        self._inflight.discard(uid)
+        self._aborting.discard(uid)
+
     def observe(self, reply: Any, now: float | None = None) -> None:
         t = time.monotonic() if now is None else now
         if getattr(reply, "completion_tokens_delta", 0) > 0:

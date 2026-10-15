@@ -39,10 +39,10 @@ from pydantic import BaseModel
 from starlette.datastructures import Headers
 
 from .args import ServerArgs
-from .anthropic_api import register_anthropic_routes
+from .anthropic_api import _anthropic_error_response, register_anthropic_routes
 from .accounting import AdmissionClosedError, register_accounting_routes
 from .control_api import register_control_routes
-from .openai_api import register_openai_routes
+from .openai_api import create_error_response, register_openai_routes
 from . import request_ring
 from .access_log_filter import install_polling_access_log_filter
 from .request_logger import init as init_request_logging, log_request
@@ -129,6 +129,22 @@ class GenerateRequest(BaseModel):
     prompt: str
     max_tokens: int
     ignore_eos: bool = False
+
+
+class UnencodableRequestError(ValueError):
+    """A request field the IPC encoder (msgpack) cannot pack: an int outside 64 bits, a lone
+    UTF-16 surrogate. Answered as HTTP 400 by install_unencodable_handler."""
+
+
+def install_unencodable_handler(app: FastAPI) -> None:
+    """400 for UnencodableRequestError, in the error shape of the protocol that was called."""
+
+    async def _handler(request: Request, exc: UnencodableRequestError) -> JSONResponse:
+        if request.url.path.startswith("/v1/messages"):
+            return _anthropic_error_response(400, "invalid_request_error", str(exc))
+        return create_error_response(str(exc))
+
+    app.add_exception_handler(UnencodableRequestError, _handler)
 
 
 @dataclass
@@ -326,7 +342,22 @@ class FrontendManager:
 
     async def send_one(self, msg: BaseTokenizerMsg):
         self._create_listener_once()
-        await self.send_tokenizer.put(msg)
+        try:
+            await self.send_tokenizer.put(msg)
+        except (OverflowError, UnicodeEncodeError, TypeError, ValueError) as exc:
+            # msgpack rejects ints outside 64 bits and lone surrogates. new_user() has already
+            # registered the uid and no engine ack will ever release it (#681): release it here
+            # and answer the client with a 400 instead of a 500.
+            uid = getattr(msg, "uid", None)
+            if isinstance(msg, TokenizeMsg) and uid in self.event_map:
+                self.ack_map.pop(uid, None)
+                self.event_map.pop(uid, None)
+                if self.stats is not None:
+                    self.stats.on_rejected(uid)
+                raise UnencodableRequestError(
+                    f"request contains a value the server cannot encode: {exc}"
+                ) from exc
+            raise
 
     async def wait_for_ack(self, uid: int):
         event = self.event_map[uid]
@@ -459,6 +490,7 @@ register_anthropic_routes(app, get_global_state, lambda: _MODEL_SAMPLING)
 register_responses_routes(app, get_global_state, lambda: _MODEL_SAMPLING)
 register_control_routes(app, get_global_state, lambda: _MODEL_SAMPLING)
 register_accounting_routes(app, get_global_state)
+install_unencodable_handler(app)
 
 
 # Paths the HTTP middleware logs into the request ring. The three chat protocols funnel through
