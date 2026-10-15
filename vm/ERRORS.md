@@ -25,13 +25,13 @@ Logs are in /data/freetoken-test/*.log (not committed).
 ## E4. `/health` is HTTP 200 while loading or dead, 2026-10-14
 - **Seen:** readiness loop said HEALTHY in 10 s; real requests got 503 for ~90 s more.
 - **Cause:** by design. control_api.py `/health` always answers 200 and puts `status: loading|ok|error` in the body (api_server.py `maintenance_state`). Not a bug, but plain HTTP probes (systemd, docker, uptime monitors) read 200 as healthy.
-- **Status:** worked around. vm/wait-ready.sh waits for a real 8-token completion.
+- **Status:** worked around. vm/wait-ready.sh waits for a real 8-token completion. Fixed in the engine 2026-10-15: see F4 (`/health?strict=1`).
 - **Fix plan (fork, small):** `GET /health?strict=1` (or `/ready`) returning 503 unless `status == ok`. Keep the default as is, because the desktop app polls `/health` for load progress.
 
 ## E5. Backend death stops the whole server, no restart, 2026-10-14
 - **Seen:** after E1/E2 the log says "Backend worker is gone and cannot be restarted; stopping the API server" (api_server.py `_exit_after_backend_death`).
 - **Cause:** by design; there is no supervisor. #688 (open upstream) adds opt-in recovery for runtime CUDA OOM only.
-- **Status:** open (not needed for testing).
+- **Status:** fixed 2026-10-15 by supervisor + systemd unit, see F2.
 - **Fix plan:** if this becomes a service, run it under a systemd unit with `Restart=on-failure` instead of patching the engine. Track #688 for OOM recovery.
 
 ## E6. (ours) `pkill -f`/`pgrep -f` matched the ssh command, 2026-10-14
@@ -89,19 +89,42 @@ Policy: every fix goes into this fork (branch `vm`); nothing is sent upstream. E
 - **Plan:** systemd unit `freetoken.service` (User=beyond1, ExecStart=vm/serve.sh, `Restart=on-failure`, `RestartSec=10`) so any crash (F1, OOM, etc.) self-heals. memguard becomes a sidecar unit. Optional later: merge open PR #688 (`--oom-recovery`, 4 commits, 35 files, mergeable) for in-process recovery from runtime CUDA OOM. It's large, so only if OOMs actually happen.
 - **Seen 2026-10-15 (F1 control run):** after the backend died, the API server hung in "Waiting for connections to close" and the in-flight requests got no error; the clients just waited for their own timeout (600 s here). The unit must therefore use `TimeoutStopSec=20` + `KillMode=mixed` so systemd SIGKILLs a stuck shutdown and restarts.
 - **Can it be fixed?** Yes.
+- **Status 2026-10-15: fixed.** `vm/supervise.sh` runs a launcher and polls `/health` every 5 s:
+  backend `error` or `ft serve` exiting on its own → stop it (SIGTERM, SIGKILL after 20 s) and exit 1 so systemd restarts it;
+  MemAvailable < `MEMGUARD_MIB` (replaces memguard.sh) or `systemctl stop` → exit 0, no restart.
+  `vm/systemd/freetoken@.service` (+ `gptoss.env`, `qwen.env`): `Restart=on-failure`, `RestartSec=15`, 3 restarts per 10 min max,
+  `KillMode=mixed`, `TimeoutStopSec=45`. Installed to /etc/systemd/system 2026-10-15, **not enabled at boot** (shared GPU):
+  `sudo systemctl start freetoken@gptoss` / `freetoken@qwen`; supervisor log in `journalctl -u freetoken@<inst>`.
+  - Red (plain launcher, Qwen offload 25%): `kill -9` of the GPU worker → `/health` error, API exited itself at ~12 s, still down at 90 s.
+  - Green (`freetoken@qwen`): same kill → supervisor "backend died" → exit 1 → systemd restart #1 → `/health?strict=1` 200 at ~50 s, completion answered " Paris, a city".
+  - `systemctl stop`: 1 s, Result=success, no `ft serve` left, no orphan timer (fixed in 37a6cbc).
+  - Low memory (`MEMGUARD_MIB=999999`): "stopping without restart", exit 0, no `ft serve` left.
+  - Not tested: a real CUDA OOM, and the in-flight-request hang (covered by the same SIGKILL path).
 
 ## F3. #681: unpackable request field → HTTP 500 + leaked `requests.active` (priority 3)
 - **Cause:** `state.new_user()` registers the uid (ack_map, event_map, stats) before `send_one` msgpack-packs the message. A pack error leaves the uid registered forever.
 - **Plan:** in `generation.submit_generation` (and the two raw paths in openai_api.py ~L412/L428), wrap `send_one` in try/except. On failure, pop `ack_map`/`event_map`, call `stats.on_abort(uid)`, and raise a 400 (`invalid_request_error`). Test: `max_tokens=2**64` → 400, and `/v1/stats` active back to 0.
 - **Can it be fixed?** Yes, small.
+- **Status 2026-10-15: fixed** (65763c9). `FrontendManager.send_one` catches the pack error for a TokenizeMsg, drops the uid from
+  ack_map/event_map and `StatsTracker.on_rejected` (new: no engine ack will ever release it), and raises `UnencodableRequestError`;
+  `install_unencodable_handler` answers 400 `invalid_request_error` (Anthropic error shape on /v1/messages, OpenAI elsewhere).
+  - Tests `tests/server/test_unencodable_request.py` (real msgpack/zmq queue over ipc, real handle_completion): 7 pass.
+    Control with only the release lines removed: the 2 leak tests fail (`assert 1 == 0` on requests.active).
+  - Live (`vm/live_f3_f5.py`, Qwen): all 10 #681 shapes (chat/completions/messages/responses; ints ≥2**64 and < -2**63, lone surrogate)
+    → HTTP 400, each packable control → 200, `requests.active` 0 → 0 throughout.
 
 ## F4. E4: `/health` always HTTP 200 (priority 4)
 - **Plan:** `GET /health?strict=1` → 503 unless `status == "ok"` (control_api.py `health()`); the default stays for the desktop app. The systemd watchdog and wait-ready.sh use strict mode.
 - **Can it be fixed?** Yes, small.
+- **Status 2026-10-15: fixed** (375f644). `GET /health?strict=1` → 503 unless `status == ok` and `maintenance == serving`, same body;
+  plain `/health` unchanged (always 200, for the desktop app). Tests `tests/server/test_health_strict.py`: 8 (3 red before).
+  Live: during loading plain 200 / strict 503 (6/6 probes), serving 200 / 200. supervise.sh reads the body status.
 
 ## F5. #682: `/v1/completions` silently ignores `n` (priority 5)
 - **Plan:** copy chat's guard (`if req.n != 1: return create_error_response("Only n=1 is supported", param="n")`, openai_api.py L167) into `handle_completion`. Test: n=2 → 400.
 - **Can it be fixed?** Yes, trivial.
+- **Status 2026-10-15: fixed** (12a04e9). `handle_completion` rejects `n != 1` like chat does. Test
+  `test_completion_rejects_n_other_than_one` (red: handler returned a completion). Live: n=2 → 400 `param: n`.
 
 ## F6. E8: cached tokens missing from `usage` (priority 6)
 - **Finding:** not a bug. FreeToken reports them only with `--enable-cache-report` (args.py). **Plan:** add the flag to serve.sh defaults.

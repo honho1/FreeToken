@@ -14,6 +14,9 @@ Checkout `/data/freetoken`, venv `/data/freetoken/.venv`, logs `/data/freetoken-
 | prefill.py | `prefill.py <port> <model> [chars]`: long-prompt prefill, cold then prefix-cached |
 | serve-gptoss.sh | `serve-gptoss.sh <logname> [args]`: gpt-oss-120b with the tested offload flags + `--cache-type radix --enable-cache-report` (`--cache-type naive` overrides) |
 | repro_683.py, repro_683_runs.sh, stress_683.py | SWA radix-cache crash repro and stress (ERRORS.md F1) |
+| supervise.sh | `[SERVE=…] [MEMGUARD_MIB=4096] supervise.sh <logname> [args]`: runs a launcher, exit 1 on backend death (restart), 0 on stop/low memory (ERRORS.md F2) |
+| systemd/ | `freetoken@.service` + `gptoss.env`/`qwen.env`; installed, not enabled: `sudo systemctl start freetoken@gptoss` |
+| live_f3_f5.py | `live_f3_f5.py [--port] [--model]`: live check of #681 shapes, `n`, `/health?strict` |
 | ERRORS.md | every error hit, cause, status, fix plan |
 
 Since 2026-10-15 the venv is an **editable install of this checkout** (`vm/setup-venv.sh --source`, which also installs pytest), so code edits take effect on the next `ft serve`. requirements-vm.lock.txt still describes the earlier wheel setup: plain `vm/setup-venv.sh` goes back to it, and a copy of that venv is in /data/freetoken-test/venv-wheel-backup.
