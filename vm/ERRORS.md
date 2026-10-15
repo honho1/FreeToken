@@ -105,7 +105,7 @@ Policy: every fix goes into this fork (branch `vm`); nothing is sent upstream. E
 
 ## F6. E8: cached tokens missing from `usage` (priority 6)
 - **Finding:** not a bug. FreeToken reports them only with `--enable-cache-report` (args.py). **Plan:** add the flag to serve.sh defaults.
-- **Status 2026-10-15:** done for gpt-oss (serve-gptoss.sh); serve.sh (Qwen default) still without it.
+- **Status 2026-10-15: done.** `vm/serve.sh` (the base every launcher uses) always passes `--enable-cache-report`. Live check on Qwen3.6-35B FP8 (offload 25%): the same 3804-token prompt twice → 2nd response `usage.prompt_tokens_details.cached_tokens = 3776`, 1st none.
 - **Can it be fixed?** Yes, config only.
 
 ## F7. E1–E3: install needs a manual CUDA toolchain (priority 7)
