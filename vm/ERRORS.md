@@ -8,7 +8,7 @@ Logs are in /data/freetoken-test/*.log (not committed).
 - **Seen:** first request after `ft serve` → backend died: `RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda' doesn't exist` (flashinfer/jit/cpp_ext.py). API server then shut itself down.
 - **Cause:** the nightly wheels prebuild FreeToken's own kernels, but FlashInfer still JIT-compiles attention kernels on first use. The VM has the driver only, no toolkit.
 - **Status:** worked around. pip CUDA toolchain in the venv + `CUDA_HOME` in vm/serve.sh; vm/setup-venv.sh rebuilds it.
-- **Fix plan (fork):** a `cuda-jit` extra in pyproject.toml pinning `nvidia-cuda-nvcc/crt/cccl/nvvm/nvjitlink==13.0.*` + `ninja`, and set `CUDA_HOME` from the pip location when unset (flashinfer honours it). Worth offering upstream: docs/install.md says a toolkit is needed but not that a pip one works.
+- **Fix plan (fork):** a `cuda-jit` extra in pyproject.toml pinning `nvidia-cuda-nvcc/crt/cccl/nvvm/nvjitlink==13.0.*` + `ninja`, and set `CUDA_HOME` from the pip location when unset (flashinfer honours it).
 
 ## E2. `ninja` not found, 2026-10-14
 - **Seen:** `FileNotFoundError: 'ninja'` on the same first request.
@@ -49,7 +49,6 @@ Logs are in /data/freetoken-test/*.log (not committed).
   - `tests/server` + `tests/tokenizer`: 678 passed, 24 skipped (need weights).
   - Real gpt-oss tokenizer: a missing description renders identically to `""`.
   - Live gpt-oss-120b on the source build: OpenAI tools with description missing / `null` / set → all HTTP 200 with a correct `get_weather` call. Anthropic `/v1/messages` tool without description → `tool_use` get_weather {city: Paris}. 0 "tokenization failed" lines, decode 141 tok/s (same as the wheel).
-- **Upstream:** template-agnostic and small; can be offered as a PR to FlashML-org/FreeToken.
 
 ## E8. `usage.prompt_tokens_details.cached_tokens` not reported, 2026-10-14
 - **Seen:** second identical 9.3k-token prompt: server log `#cached-token: 9310`, but the response `usage` has no `prompt_tokens_details`.
@@ -60,5 +59,51 @@ Logs are in /data/freetoken-test/*.log (not committed).
 ## Watch list (open upstream, not hit yet)
 - #681 a request field msgpack can't pack → 500 + permanently leaked `requests.active`.
 - #682 `/v1/completions` ignores `n`.
-- #683 SWA radix cache frees its own slots under a specific prefix-cache pattern.
+- #683 SWA radix cache frees its own slots under a specific prefix-cache pattern. **Affects gpt-oss** (see F1).
 - #688 runtime CUDA OOM recovery is opt-in.
+
+---
+
+# Fork fix plan (2026-10-15)
+
+Policy: every fix goes into this fork (branch `vm`); nothing is sent upstream. Each fix: a test that fails first, the fix, then `tests/server tests/tokenizer` + a live check on VM 101, then a status update in this file.
+
+## F1. #683: SWA radix cache can crash the scheduler on gpt-oss (priority 1)
+- **Risk:** gpt-oss (both sizes) runs `cache_type='swa_radix'` (seen in our log). Two overlapping requests that share their first tokens (agents reusing a system prompt) can kill the scheduler (`SWA-slot leak/double-free` assertion), and then the whole server exits (E5). Reported 9/9 reproducible on gpt-oss-20b.
+- **Step 1, workaround (minutes):** serve gpt-oss with `--cache-type naive` until fixed. The report confirms it survives. Cost: no prefix reuse, so every prompt is prefilled in full (~3 s per 9k tokens at our measured ~2.9k tok/s).
+- **Step 2, reproduce here:** script the report's two-request sequence (long prompt still running + short prompt sharing its head) against gpt-oss-120b → expect the assertion.
+- **Step 3, fix:** merge open PR #651 (same assertion family, #204; 3 files, mergeable) into the fork and rerun the repro. If it still dies, fix `_cache_req_swa` / `match_prefix` along the report's analysis: an unfinished commit must re-point B's page-table row at the tree's slots for the whole committed span, not only `m.cached_len`.
+- **Can it be fixed?** Yes, probably. It's the hardest item. If step 3 doesn't converge, step 1 stays as the permanent setting for gpt-oss and I'll tell you.
+
+## F2. E5: server exits when the backend dies (priority 2)
+- **Plan:** systemd unit `freetoken.service` (User=beyond1, ExecStart=vm/serve.sh, `Restart=on-failure`, `RestartSec=10`) so any crash (F1, OOM, etc.) self-heals. memguard becomes a sidecar unit. Optional later: merge open PR #688 (`--oom-recovery`, 4 commits, 35 files, mergeable) for in-process recovery from runtime CUDA OOM. It's large, so only if OOMs actually happen.
+- **Can it be fixed?** Yes.
+
+## F3. #681: unpackable request field → HTTP 500 + leaked `requests.active` (priority 3)
+- **Cause:** `state.new_user()` registers the uid (ack_map, event_map, stats) before `send_one` msgpack-packs the message. A pack error leaves the uid registered forever.
+- **Plan:** in `generation.submit_generation` (and the two raw paths in openai_api.py ~L412/L428), wrap `send_one` in try/except. On failure, pop `ack_map`/`event_map`, call `stats.on_abort(uid)`, and raise a 400 (`invalid_request_error`). Test: `max_tokens=2**64` → 400, and `/v1/stats` active back to 0.
+- **Can it be fixed?** Yes, small.
+
+## F4. E4: `/health` always HTTP 200 (priority 4)
+- **Plan:** `GET /health?strict=1` → 503 unless `status == "ok"` (control_api.py `health()`); the default stays for the desktop app. The systemd watchdog and wait-ready.sh use strict mode.
+- **Can it be fixed?** Yes, small.
+
+## F5. #682: `/v1/completions` silently ignores `n` (priority 5)
+- **Plan:** copy chat's guard (`if req.n != 1: return create_error_response("Only n=1 is supported", param="n")`, openai_api.py L167) into `handle_completion`. Test: n=2 → 400.
+- **Can it be fixed?** Yes, trivial.
+
+## F6. E8: cached tokens missing from `usage` (priority 6)
+- **Finding:** not a bug. FreeToken reports them only with `--enable-cache-report` (args.py). **Plan:** add the flag to serve.sh defaults.
+- **Can it be fixed?** Yes, config only.
+
+## F7. E1–E3: install needs a manual CUDA toolchain (priority 7)
+- **Plan:** a `cuda-jit` extra in the fork's pyproject.toml (`nvidia-cuda-nvcc/crt/cccl/nvvm/nvjitlink==13.0.*`, `ninja`), and set `CUDA_HOME` to the pip `nvidia/cu13` dir at startup when unset and it exists. Then serve.sh no longer needs its exports.
+- **Can it be fixed?** Yes.
+
+## F8. Keeping the fork current
+- **Plan:** `git fetch upstream && git merge upstream/main` into `vm` when wanted, then rerun the tests + a gpt-oss smoke run. Our fixes are small and local, so conflicts should be rare. Re-check whether upstream fixed #683/#681/#682 itself, and drop our version if so.
+
+## Not fixable in software (limits, not bugs)
+- **Host RAM ceiling:** offload keeps every expert in pinned host RAM. VM 101 has 86 GB (~72 usable), so ~65 GB of experts is the practical max (gpt-oss-120b fits; GLM-5.2-class models don't). Only fix: give VM 101 more RAM (pve has 124 GB, VM 100 takes 20, the host needs ≥12) or add DIMMs.
+- **Offload speed:** speed falls as fewer experts fit on the GPU (Qwen 25% → 135, 10% → 82 tok/s; gpt-oss 4-way → 52/stream). That's PCIe-bound (measured 53 GB/s, already Gen5 x16).
+- **Slower than vLLM when the model fits** (211 vs 224 tok/s): engine design. Use vLLM for models that fit.
