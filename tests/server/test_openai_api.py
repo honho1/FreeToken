@@ -687,3 +687,22 @@ def test_minimax_http_non_stream_forces_implicit_reasoning_without_request_knob(
     message = response["choices"][0]["message"]
     assert message["reasoning_content"] == "private thought"
     assert message["content"] == "visible answer"
+
+
+def test_completion_rejects_n_other_than_one():
+    # #682: /v1/completions used to accept n=2 and silently return one choice.
+    state = FakeState([UserReply(uid=42, incremental_output="hello", finished=True)])
+    response = run(
+        handle_completion(
+            CompletionRequest(model="client-model", prompt="say hi", n=2),
+            request=None,
+            state=state,
+            model_sampling={},
+        )
+    )
+
+    assert response.status_code == 400
+    body = json.loads(response.body)
+    assert body["error"]["param"] == "n"
+    assert body["error"]["message"] == "Only n=1 is supported"
+    assert state.sent is None  # rejected before anything reached the engine
