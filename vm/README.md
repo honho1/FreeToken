@@ -12,6 +12,8 @@ Checkout `/data/freetoken`, venv `/data/freetoken/.venv`, logs `/data/freetoken-
 | memguard.sh | `memguard.sh [MiB]`: kills ft serve if MemAvailable < limit (default 4096). Start after serve. |
 | tps.py | `tps.py <port> <model> [keyfile]`: 2x 512-token streamed decode |
 | prefill.py | `prefill.py <port> <model> [chars]`: long-prompt prefill, cold then prefix-cached |
+| serve-gptoss.sh | `serve-gptoss.sh <logname> [args]`: gpt-oss-120b with the tested offload flags + `--cache-type naive` (F1 workaround; `--cache-type radix` overrides) |
+| repro_683.py, repro_683_runs.sh, stress_683.py | SWA radix-cache crash repro and stress (ERRORS.md F1) |
 | ERRORS.md | every error hit, cause, status, fix plan |
 
 Since 2026-10-15 the venv is an **editable install of this checkout** (`vm/setup-venv.sh --source`, which also installs pytest), so code edits take effect on the next `ft serve`. requirements-vm.lock.txt still describes the earlier wheel setup: plain `vm/setup-venv.sh` goes back to it, and a copy of that venv is in /data/freetoken-test/venv-wheel-backup.

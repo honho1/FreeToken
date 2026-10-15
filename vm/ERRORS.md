@@ -74,9 +74,20 @@ Policy: every fix goes into this fork (branch `vm`); nothing is sent upstream. E
 - **Step 2, reproduce here:** script the report's two-request sequence (long prompt still running + short prompt sharing its head) against gpt-oss-120b → expect the assertion.
 - **Step 3, fix:** merge open PR #651 (same assertion family, #204; 3 files, mergeable) into the fork and rerun the repro. If it still dies, fix `_cache_req_swa` / `match_prefix` along the report's analysis: an unfinished commit must re-point B's page-table row at the tree's slots for the whole committed span, not only `m.cached_len`.
 - **Can it be fixed?** Yes, probably. It's the hardest item. If step 3 doesn't converge, step 1 stays as the permanent setting for gpt-oss and I'll tell you.
+- **Status 2026-10-15: fixed in the fork** by PR #651 (cherry-picked as bed7b1b onto `vm`). The workaround launcher stays in place until the default is switched back to radix.
+  - Step 1: `vm/serve-gptoss.sh` (all tested gpt-oss flags + `--cache-type naive`; a later `--cache-type radix` overrides it).
+  - Step 2, reproduced: `vm/repro_683.py` (own script written from the report, not the reporter's gist) via `vm/repro_683_runs.sh` (fresh server per run, `--max-prefill-length 2048`).
+    - **radix, before the fix: 3/3 runs crashed** on the first 20 ms trial: `AssertionError: SWA-slot leak/double-free: free(12690) + tree(425) != capacity(13110)` (+5 = the shared head), then "backend worker exited". Log: A's 2nd chunk and B prefilled in one batch, as reported.
+    - naive: 2/2 runs survived all trials (20/100/300 ms).
+  - Step 3, fixed: PR #651's commit applies cleanly. When an unfinished request's commit would free its copy of a tombstone another request still locks, it skips that commit and commits at finish.
+    - Tests `tests/scheduler tests/kvcache tests/server tests/tokenizer -m "not slow"`: 1051 passed, 25 skipped.
+    - Repro with #651: **3/3 runs survived** (9 trials), plus 2 more trials with B decoding 8 tokens.
+    - `vm/stress_683.py` (60 requests, 4 at a time, prompt heads shared 0–3k tokens, idle checks between waves), 2 seeds: 120/120 ok, no integrity failures. Prefix cache still active: 59 responses with cached tokens, up to 1525.
+    - **Control: same stress, seed 0, without #651 → crashed** in wave 2: `free(8860) + tree(4317) != capacity(13110)` (+67). So the stress test does catch the bug and #651 fixes it.
 
 ## F2. E5: server exits when the backend dies (priority 2)
 - **Plan:** systemd unit `freetoken.service` (User=beyond1, ExecStart=vm/serve.sh, `Restart=on-failure`, `RestartSec=10`) so any crash (F1, OOM, etc.) self-heals. memguard becomes a sidecar unit. Optional later: merge open PR #688 (`--oom-recovery`, 4 commits, 35 files, mergeable) for in-process recovery from runtime CUDA OOM. It's large, so only if OOMs actually happen.
+- **Seen 2026-10-15 (F1 control run):** after the backend died, the API server hung in "Waiting for connections to close" and the in-flight requests got no error; the clients just waited for their own timeout (600 s here). The unit must therefore use `TimeoutStopSec=20` + `KillMode=mixed` so systemd SIGKILLs a stuck shutdown and restarts.
 - **Can it be fixed?** Yes.
 
 ## F3. #681: unpackable request field → HTTP 500 + leaked `requests.active` (priority 3)
