@@ -134,6 +134,13 @@ Policy: every fix goes into this fork (branch `vm`); nothing is sent upstream. E
 ## F7. E1–E3: install needs a manual CUDA toolchain (priority 7)
 - **Plan:** a `cuda-jit` extra in the fork's pyproject.toml (`nvidia-cuda-nvcc/crt/cccl/nvvm/nvjitlink==13.0.*`, `ninja`), and set `CUDA_HOME` to the pip `nvidia/cu13` dir at startup when unset and it exists. Then serve.sh no longer needs its exports.
 - **Can it be fixed?** Yes.
+- **Status 2026-10-15: resolved on VM 101 with a system toolkit** (instead of the fork extra). `cuda-toolkit-13-0` 13.0.88
+  from NVIDIA's apt repo (4.9 GB, `/usr/local/cuda` -> cuda-13.0). The repo is pinned to priority 100 in
+  `/etc/apt/preferences.d/cuda-repo-pin` so it can never replace Ubuntu's `nvidia-driver-580-open` (checked: driver
+  580.178.04 before and after; the apt candidate is still Ubuntu's). `/etc/profile.d/cuda.sh` sets CUDA_HOME + PATH for login
+  shells; `vm/serve.sh` prefers `/usr/local/cuda` and falls back to the venv's pip copy.
+  Verified: FlashInfer cache moved aside -> `freetoken@qwen` recompiled (ready in 80 s vs 31 s), build.ninja
+  `cuda_home = /usr/local/cuda`, `live_f3_f5.py` all pass. Old pip-built cache deleted.
 
 ## F8. Keeping the fork current
 - **Plan:** `git fetch upstream && git merge upstream/main` into `vm` when wanted, then rerun the tests + a gpt-oss smoke run. Our fixes are small and local, so conflicts should be rare. Re-check whether upstream fixed #683/#681/#682 itself, and drop our version if so.
