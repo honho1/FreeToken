@@ -28,10 +28,11 @@ stop_ft() {
 "$SERVE" "$@" &
 pid=$!
 log "started $SERVE (pid $pid) $*"
-trap 'log "stop requested"; stop_ft; exit 0' TERM INT
+spid=
+trap 'log "stop requested"; kill "$spid" 2>/dev/null; stop_ft; exit 0' TERM INT
 
 while kill -0 "$pid" 2>/dev/null; do
-  sleep 5 & wait $!   # wait (not a foreground sleep) so the TERM trap runs at once
+  sleep 5 & spid=$!; wait $spid   # wait (not a foreground sleep) so the TERM trap runs at once
   avail=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
   if [ "$avail" -lt "$MEMGUARD_MIB" ]; then
     log "MemAvailable ${avail} MiB < ${MEMGUARD_MIB}; stopping without restart"
