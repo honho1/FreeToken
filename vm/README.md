@@ -14,7 +14,8 @@ Checkout `/data/freetoken`, venv `/data/freetoken/.venv`, logs `/data/freetoken-
 | prefill.py | `prefill.py <port> <model> [chars]`: long-prompt prefill, cold then prefix-cached |
 | ERRORS.md | every error hit, cause, status, fix plan |
 
-The venv runs the nightly wheel, not this checkout. To run code changes made in the fork: `vm/setup-venv.sh --source`.
+Since 2026-10-15 the venv is an **editable install of this checkout** (`vm/setup-venv.sh --source`, which also installs pytest), so code edits take effect on the next `ft serve`. requirements-vm.lock.txt still describes the earlier wheel setup: plain `vm/setup-venv.sh` goes back to it, and a copy of that venv is in /data/freetoken-test/venv-wheel-backup.
+Tests: `.venv/bin/python -m pytest -q -p no:cacheprovider tests/server tests/tokenizer -m "not slow"`.
 Stop the server: `pgrep -f "[b]in/ft serve" | xargs -r kill`.
 
 ## Results

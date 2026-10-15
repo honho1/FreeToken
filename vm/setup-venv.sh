@@ -11,7 +11,7 @@ UV=${UV:-$HOME/.local/bin/uv}
 cd "$R"
 [ -x .venv/bin/python ] || "$UV" venv -q -p 3.12 .venv
 if [ "${1:-}" = "--source" ]; then
-  CUDA_HOME=$R/.venv/lib/python3.12/site-packages/nvidia/cu13 "$UV" pip install -p .venv/bin/python -e ".[accel]"
+  CUDA_HOME=$R/.venv/lib/python3.12/site-packages/nvidia/cu13 "$UV" pip install -p .venv/bin/python -e ".[accel,dev]"
 else
   "$UV" pip install -p .venv/bin/python -r vm/requirements-vm.lock.txt
 fi
