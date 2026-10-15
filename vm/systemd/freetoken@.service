@@ -1,0 +1,27 @@
+# FreeToken on 127.0.0.1:8096, one model at a time: freetoken@gptoss or freetoken@qwen.
+# Installed from /data/freetoken/vm/systemd/ (ERRORS.md F2). NOT enabled at boot on purpose:
+# the GPU is shared with vLLM, Ollama, ComfyUI and jvsr, so start it when you want it:
+#   sudo systemctl start freetoken@gptoss      sudo systemctl stop freetoken@gptoss
+#   journalctl -u freetoken@gptoss -f           (supervisor lines; engine log: /data/freetoken-test/systemd-<inst>.log)
+[Unit]
+Description=FreeToken %i (127.0.0.1:8096)
+After=network-online.target
+# A crash loop gives up after 3 restarts in 10 minutes instead of hammering the GPU.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=beyond1
+Group=beyond1
+EnvironmentFile=/data/freetoken/vm/systemd/%i.env
+ExecStart=/data/freetoken/vm/supervise.sh systemd-%i $SERVE_ARGS
+Restart=on-failure
+RestartSec=15
+# The supervisor stops ft serve itself (SIGTERM, then SIGKILL after STOP_GRACE); mixed lets it,
+# and systemd only SIGKILLs the rest if the whole stop takes longer than TimeoutStopSec.
+KillMode=mixed
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target
