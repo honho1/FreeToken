@@ -11,6 +11,7 @@ import time
 from typing import Any, Callable
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 
 def build_health(state: Any, version: str) -> dict:
@@ -55,8 +56,13 @@ def register_control_routes(
     get_model_sampling: Callable[[], dict] | None = None,
 ) -> None:
     @app.get("/health")
-    async def health():
-        return build_health(get_state(), app.version)
+    async def health(strict: bool = False):
+        doc = build_health(get_state(), app.version)
+        # Plain /health is always 200 so the desktop app can poll load progress; strict=1 gives
+        # probes that only read the status code (systemd, docker, curl -f) a 503 until serving.
+        if strict and not (doc["status"] == "ok" and doc.get("maintenance") == "serving"):
+            return JSONResponse(doc, status_code=503)
+        return doc
 
     from . import request_ring
 
