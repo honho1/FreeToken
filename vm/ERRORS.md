@@ -74,7 +74,7 @@ Policy: every fix goes into this fork (branch `vm`); nothing is sent upstream. E
 - **Step 2, reproduce here:** script the report's two-request sequence (long prompt still running + short prompt sharing its head) against gpt-oss-120b → expect the assertion.
 - **Step 3, fix:** merge open PR #651 (same assertion family, #204; 3 files, mergeable) into the fork and rerun the repro. If it still dies, fix `_cache_req_swa` / `match_prefix` along the report's analysis: an unfinished commit must re-point B's page-table row at the tree's slots for the whole committed span, not only `m.cached_len`.
 - **Can it be fixed?** Yes, probably. It's the hardest item. If step 3 doesn't converge, step 1 stays as the permanent setting for gpt-oss and I'll tell you.
-- **Status 2026-10-15: fixed in the fork** by PR #651 (cherry-picked as bed7b1b onto `vm`). The workaround launcher stays in place until the default is switched back to radix.
+- **Status 2026-10-15: fixed in the fork** by PR #651 (cherry-picked as bed7b1b onto `vm`). `vm/serve-gptoss.sh` is back on `--cache-type radix` + `--enable-cache-report`. Smoke test: resolved `swa_radix`, 20-request stress 0 errors, 10 responses reporting cached tokens.
   - Step 1: `vm/serve-gptoss.sh` (all tested gpt-oss flags + `--cache-type naive`; a later `--cache-type radix` overrides it).
   - Step 2, reproduced: `vm/repro_683.py` (own script written from the report, not the reporter's gist) via `vm/repro_683_runs.sh` (fresh server per run, `--max-prefill-length 2048`).
     - **radix, before the fix: 3/3 runs crashed** on the first 20 ms trial: `AssertionError: SWA-slot leak/double-free: free(12690) + tree(425) != capacity(13110)` (+5 = the shared head), then "backend worker exited". Log: A's 2nd chunk and B prefilled in one batch, as reported.
@@ -105,6 +105,7 @@ Policy: every fix goes into this fork (branch `vm`); nothing is sent upstream. E
 
 ## F6. E8: cached tokens missing from `usage` (priority 6)
 - **Finding:** not a bug. FreeToken reports them only with `--enable-cache-report` (args.py). **Plan:** add the flag to serve.sh defaults.
+- **Status 2026-10-15:** done for gpt-oss (serve-gptoss.sh); serve.sh (Qwen default) still without it.
 - **Can it be fixed?** Yes, config only.
 
 ## F7. E1–E3: install needs a manual CUDA toolchain (priority 7)
