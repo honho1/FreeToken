@@ -17,6 +17,7 @@ Checkout `/data/freetoken`, venv `/data/freetoken/.venv`, logs `/data/freetoken-
 | supervise.sh | `[SERVE=…] [MEMGUARD_MIB=4096] supervise.sh <logname> [args]`: runs a launcher, exit 1 on backend death (restart), 0 on stop/low memory (ERRORS.md F2) |
 | systemd/ | `freetoken@.service` + `gptoss.env`/`qwen.env`; installed, not enabled: `sudo systemctl start freetoken@gptoss` |
 | live_f3_f5.py | `live_f3_f5.py [--port] [--model]`: live check of #681 shapes, `n`, `/health?strict` |
+| measure_cost.py | VRAM / host RAM / decode per backend for Qwen3.6-35B (vLLM, Ollama, FreeToken at several expert shares) |
 | ERRORS.md | every error hit, cause, status, fix plan |
 
 Since 2026-10-15 the venv is an **editable install of this checkout** (`vm/setup-venv.sh --source`, which also installs pytest), so code edits take effect on the next `ft serve`. requirements-vm.lock.txt still describes the earlier wheel setup: plain `vm/setup-venv.sh` goes back to it, and a copy of that venv is in /data/freetoken-test/venv-wheel-backup.
@@ -54,3 +55,22 @@ vm/memguard.sh 4096 &
 - 4 parallel streams × 512 tokens: 208 tok/s aggregate, ~52 per stream. More distinct experts per step means more misses.
 - Tool calls OK when the tool has a description (see ERRORS.md E7); /v1/messages OK.
 - Needs VRAM shared with nothing big: the Trading Platform desk Ollama model (37 GB, keep-alive 30 min) must be unloaded first.
+
+### What Qwen3.6-35B-A3B costs to keep loaded, per backend (2026-10-15, `measure_cost.py`)
+
+512-token decode, batch 1, temperature 0, 6 runs each after a warm-up (sequential per backend, not alternated),
+vLLM (OpenDots) idle on the GPU throughout. FreeToken with `--num-tokens 65536`.
+
+| backend | VRAM | host RAM held | decode tok/s, median (range) |
+|---|---|---|---|
+| vLLM FP8, gpu-util 0.45 (OpenDots) | 44.8 GB | — | 224.1 (223.9–224.2) |
+| Ollama Q8 GGUF (Trading Platform desk) | 39.3 GB | 0.9 GB | 215.2 (214.8–215.6) |
+| FreeToken fused (all experts on GPU) | 38.2 GB | 5.1 GB | 211.8 (211.8–211.9) |
+| FreeToken offload, 50 % of experts on GPU | 22.9 GB | 35.8 GB | 191.1 (189.9–191.1) |
+| FreeToken offload, 25 % | 15.2 GB | 35.8 GB | 136.4 (135.8–136.5) |
+| FreeToken offload, 10 % | 10.6 GB | 35.6 GB | 81.7 (80.9–81.8) |
+
+Limiter for the offload rows: expert misses fetched over PCIe (Gen5 x16, ~53 GB/s measured by `ft bench bw`); fewer experts
+on the GPU = more misses. Offload trades VRAM for pinned host RAM: the whole expert bank stays in RAM (~35 GB), whatever
+share is cached. Not tuned: vLLM's 44.8 GB is mostly KV cache at gpu-util 0.45 / 131k context / 64 sequences; a lower
+gpu-util would also shrink it (untested). The two existing Qwen copies (vLLM 44.8 + Ollama 39.3 = 84 GB) are the same model.
