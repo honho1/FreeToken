@@ -816,3 +816,81 @@ def encode_messages(messages, thinking_mode, reasoning_effort=None):
     )
     assert manager.render_prompt(msg) == f"Reasoning Effort: {budget}"
     assert msg.chat_template_kwargs["reasoning_effort"] == budget
+
+
+class JinjaTokenizer:
+    """Renders a real Jinja template the way HF's apply_chat_template does (sandboxed,
+    default Undefined), so a template that reads an absent attribute fails like it does
+    in production."""
+
+    def __init__(self, template: str) -> None:
+        from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+        self.template = ImmutableSandboxedEnvironment().from_string(template)
+        self.calls = 0
+        self.last_tools = None
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True, **kwargs):
+        self.calls += 1
+        self.last_tools = deepcopy(kwargs.get("tools"))
+        return self.template.render(messages=messages, **kwargs)
+
+
+# gpt-oss's chat_template.jinja (render_tool_namespace) concatenates the description
+# unconditionally; the OpenAI API makes it optional and the server drops None fields.
+_GPT_OSS_TOOL_LINE = (
+    "{%- for tool in tools %}{%- set tool = tool.function %}"
+    "{{- '// ' + tool.description + '\\n' }}{{- 'type ' + tool.name + '\\n' }}{%- endfor %}"
+)
+
+
+def _render(manager, tools):
+    msg = TokenizeMsg(
+        uid=1, text=[{"role": "user", "content": "weather?"}], sampling_params=SamplingParams(), tools=tools
+    )
+    return manager.render_prompt(msg)
+
+
+@pytest.mark.parametrize("description", ["absent", None])
+def test_missing_tool_description_renders_as_empty_on_strict_templates(description):
+    function = {"name": "get_weather", "parameters": {"type": "object"}}
+    if description is None:
+        function["description"] = None
+    tools = [{"type": "function", "function": function}]
+    original = deepcopy(tools)
+    manager = TokenizeManager(JinjaTokenizer(_GPT_OSS_TOOL_LINE))
+
+    assert _render(manager, tools) == "// \ntype get_weather\n"
+    assert tools == original  # the caller's request is never mutated
+
+
+def test_missing_description_is_filled_for_flat_tool_dicts():
+    template = "{%- for tool in tools %}{{- '// ' + tool.description + '|' + tool.name }}{%- endfor %}"
+    manager = TokenizeManager(JinjaTokenizer(template))
+
+    assert _render(manager, [{"name": "lookup", "parameters": {}}]) == "// |lookup"
+
+
+def test_templates_that_accept_missing_descriptions_see_the_tools_unchanged():
+    template = "{%- for tool in tools %}{{- tool.function | tojson }}{%- endfor %}"
+    tokenizer = JinjaTokenizer(template)
+    manager = TokenizeManager(tokenizer)
+    tools = [{"type": "function", "function": {"name": "lookup", "parameters": {}}}]
+
+    _render(manager, tools)
+
+    assert tokenizer.calls == 1
+    assert tokenizer.last_tools == tools  # no description key added when nothing failed
+
+
+def test_template_errors_unrelated_to_descriptions_still_raise():
+    from jinja2.exceptions import UndefinedError
+
+    template = "{%- for tool in tools %}{{- '// ' + tool.function.summary }}{%- endfor %}"
+    tokenizer = JinjaTokenizer(template)
+    manager = TokenizeManager(tokenizer)
+    tools = [{"type": "function", "function": {"name": "lookup", "description": "Find a thing."}}]
+
+    with pytest.raises(UndefinedError):
+        _render(manager, tools)
+    assert tokenizer.calls == 1  # no retry when every tool already has a description

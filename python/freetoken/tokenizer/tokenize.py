@@ -9,6 +9,7 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Any, List
 
 import torch
+from jinja2.exceptions import UndefinedError
 from freetoken.message import TokenizeMsg, UserMsg
 from freetoken.utils import init_logger
 from transformers import PreTrainedTokenizerBase
@@ -156,12 +157,27 @@ class TokenizeManager:
             )
         if tools is not None:
             chat_template_kwargs = {**chat_template_kwargs, "tools": tools}
-        prompt = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            **chat_template_kwargs,
-        )
+        try:
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                **chat_template_kwargs,
+            )
+        except (UndefinedError, TypeError):
+            # Some templates (gpt-oss) concatenate the tool description unconditionally,
+            # while the OpenAI API makes it optional (and request models drop None fields).
+            # Fill "" and render again only after such a failure, so templates that accept
+            # a missing description keep rendering byte-identical prompts.
+            filled = _with_tool_descriptions(tools)
+            if filled is None:
+                raise
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                **{**chat_template_kwargs, "tools": filled},
+            )
         assert isinstance(prompt, str)
         return prompt
 
@@ -215,6 +231,24 @@ class TokenizeManager:
         else:
             sanitized["reasoning_effort"] = mapped
         return sanitized
+
+
+def _with_tool_descriptions(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """Copy of ``tools`` with every absent or None description set to "", for both the
+    OpenAI ``{"type": "function", "function": {...}}`` shape and flat ``{"name": ...}``
+    dicts. None when no tool lacked one (the caller then re-raises). Never mutates."""
+    filled: list[dict[str, Any]] = []
+    changed = False
+    for tool in tools or []:
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict):
+            if tool["function"].get("description") is None:
+                tool = {**tool, "function": {**tool["function"], "description": ""}}
+                changed = True
+        elif isinstance(tool, dict) and "name" in tool and tool.get("description") is None:
+            tool = {**tool, "description": ""}
+            changed = True
+        filled.append(tool)
+    return filled if changed else None
 
 
 def _load_dsv4_encoder_if_needed(tokenizer: PreTrainedTokenizerBase) -> ModuleType | None:
